@@ -1,0 +1,147 @@
+import argparse
+import csv
+import requests
+import xml.etree.ElementTree as ET
+import re
+
+# List of common pharmaceutical/biotech company keywords
+COMPANY_KEYWORDS = [
+    'Pfizer', 'Novartis', 'Johnson & Johnson', 'Merck', 'Roche', 
+    'AstraZeneca', 'Bristol-Myers Squibb', 'Eli Lilly', 'Amgen', 'GSK', 'Sanofi'
+]
+
+def fetch_papers(query):
+    """
+    Fetch research papers from PubMed based on the user query.
+    """
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+    params = {
+        "db": "pubmed",
+        "term": query,
+        "retmax": 100,  # Number of results to fetch
+        "usehistory": "y",
+        "retmode": "xml"
+    }
+    
+    response = requests.get(url, params=params)
+    if response.status_code != 200:
+        print(f"Error fetching data from PubMed: {response.status_code}")
+        return None
+    
+    return response.text
+
+
+def fetch_details(id_list):
+    """
+    Fetch detailed information (author, title, publication date) for a list of PubMed IDs.
+    """
+    ids = ",".join(id_list)
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    params = {
+        "db": "pubmed",
+        "id": ids,
+        "retmode": "xml"
+    }
+    
+    response = requests.get(url, params=params)
+    if response.status_code != 200:
+        print(f"Error fetching details from PubMed: {response.status_code}")
+        return None
+    
+    return response.text
+
+
+def parse_papers(xml_data):
+    """
+    Parse the XML response and extract relevant information.
+    """
+    root = ET.fromstring(xml_data)
+    papers = []
+    
+    for docsum in root.findall(".//DocSum"):
+        pubmed_id = docsum.find(".//Id").text
+        title = docsum.find(".//Item[@Name='Title']").text
+        publication_date = docsum.find(".//Item[@Name='PubDate']").text
+        authors = docsum.findall(".//Item[@Name='Author']")
+        
+        author_names = [author.text for author in authors]
+        company_affiliations = []
+        non_academic_authors = []
+        corresponding_author_email = None
+        
+        for author in authors:
+            affiliation = author.find(".//Affiliation")
+            if affiliation is not None:
+                affiliation_text = affiliation.text.lower()
+                # Check if any of the affiliations are related to pharma or biotech companies
+                if any(company.lower() in affiliation_text for company in COMPANY_KEYWORDS):
+                    company_affiliations.append(affiliation.text)
+                    non_academic_authors.append(author.text)
+            
+            # If this author has a corresponding email, add it
+            email = author.find(".//Email")
+            if email is not None:
+                corresponding_author_email = email.text
+        
+        papers.append({
+            "PubmedID": pubmed_id,
+            "Title": title,
+            "Publication Date": publication_date,
+            "Non-academic Author(s)": "; ".join(non_academic_authors),
+            "Company Affiliation(s)": "; ".join(company_affiliations),
+            "Corresponding Author Email": corresponding_author_email if corresponding_author_email else "N/A"
+        })
+    
+    return papers
+
+
+def save_to_csv(papers, filename):
+    """
+    Save the extracted paper details to a CSV file.
+    """
+    fieldnames = [
+        "PubmedID", "Title", "Publication Date", 
+        "Non-academic Author(s)", "Company Affiliation(s)", "Corresponding Author Email"
+    ]
+    
+    with open(filename, mode="w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(papers)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Fetch research papers from PubMed")
+    parser.add_argument("query", help="The query string to search for in PubMed")
+    parser.add_argument("-f", "--file", help="Specify the filename to save the results")
+    parser.add_argument("-d", "--debug", action="store_true", help="Print debug information")
+    
+    args = parser.parse_args()
+    
+    # Fetch papers from PubMed
+    if args.debug:
+        print(f"Searching for query: {args.query}")
+    xml_data = fetch_papers(args.query)
+    
+    if xml_data is None:
+        return
+    
+    # Extract paper details
+    paper_ids = re.findall(r"<Id>(\d+)</Id>", xml_data)
+    if not paper_ids:
+        print("No papers found for the query.")
+        return
+    
+    details_data = fetch_details(paper_ids)
+    if details_data is None:
+        return
+    
+    papers = parse_papers(details_data)
+    
+    # Print or save to CSV
+    if args.file:
+        save_to_csv(papers, args.file)
+        print(f"Results saved to {args.file}")
+    else:
+        for paper in papers:
+            print(f"PubMed ID:
